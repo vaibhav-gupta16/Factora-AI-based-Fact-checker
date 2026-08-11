@@ -1,147 +1,128 @@
 # Factora
 
-A retrieval-augmented fact-checking system. Give it a claim; it searches real
-news sources, scores each source's credibility, and returns a verdict (true /
-false / mixed / unverifiable) with a confidence score computed from the
-evidence — not guessed by a model.
+Factora is an evidence-based fact-checking system that retrieves real news coverage, evaluates source credibility, and produces a verdict with a confidence score calculated from the evidence.
 
-Built for: **BCSE206L Foundations of Data Science**
+It includes both an end-to-end data-science pipeline and a Streamlit web app for checking claims interactively.
 
-## Quick start
+## Features
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env               # then add your GROQ_API_KEY (required)
-                                    # and GUARDIAN_API_KEY (recommended, primary)
-
-python main.py --skip_pipeline     # offline steps only — download data, EDA, SQL
-                                    # (no API keys needed for this step)
-
-python test_connectivity.py        # confirms Guardian/NewsAPI are reachable
-                                    # from your network before a real run
-
-python main.py --n_samples 3       # full run: live retrieval + verdicts over
-                                    # 3 verified CURRENT claims (default source)
-
-streamlit run app.py               # interactive demo — check any claim live
-```
-
-## Getting API keys (all free, no card required)
-
-| Key | Where | Required? |
-|---|---|---|
-| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com) | **Yes** — used for query understanding and verdicts |
-| `GUARDIAN_API_KEY` | [open-platform.theguardian.com/access](https://open-platform.theguardian.com/access/) | Recommended — **primary** evidence source, key emailed instantly |
-| `NEWSAPI_KEY` | [newsapi.org/register](https://newsapi.org/register) | Recommended — **secondary/fallback** evidence source |
-
-At least one of `GUARDIAN_API_KEY` or `NEWSAPI_KEY` must be set for
-retrieval to work at all.
+- LLM-assisted claim and search-query understanding using Groq (Llama 3.3 70B)
+- Live evidence retrieval from The Guardian, with NewsAPI as a fallback
+- TF-IDF cosine-similarity filtering for article relevance
+- MBFC-derived credibility scores for 859 news domains
+- Evidence-grounded verdict generation with supporting sources
+- Confidence scoring computed in Python from credibility, relevance, and corroboration
+- Offline exploratory data analysis, SQLite analysis, and evaluation reports using the LIAR dataset
+- Interactive Streamlit interface
 
 ## How it works
 
-1. **Query understanding** — the LLM reads the claim and extracts the phrases
-   a real news headline would use, rather than mechanically grabbing
-   capitalised words. Falls back to a regex heuristic if the LLM call fails.
-2. **Retrieval** — queries a specific-to-broad search ladder. At each stage,
-   **The Guardian** (primary) is tried first; **NewsAPI** (secondary) is only
-   called for that stage if The Guardian returns nothing usable, to conserve
-   its daily quota.
-3. **Relevance filtering** — every article is scored against the claim with
-   TF-IDF cosine similarity; anything below a calibrated floor is discarded
-   before it can reach the verdict step.
-4. **Credibility weighting** — each surviving article's source domain is
-   scored using an MBFC-derived credibility corpus (859 rated domains).
-5. **Verdict** — the LLM decides true/false/mixed/unverifiable and marks
-   which evidence supports it. **Confidence is computed in Python** — not by
-   the model — from that evidence's credibility, relevance, and source count.
-   If a claim has zero coverage but describes something that would obviously
-   be major news if true, the reasoning notes that the total absence of
-   coverage is itself worth flagging.
+1. The claim is converted into focused search terms.
+2. Factora searches The Guardian first and uses NewsAPI only when needed.
+3. Retrieved articles are filtered by TF-IDF relevance.
+4. Remaining sources are weighted using domain credibility scores.
+5. Groq generates the verdict and reasoning from the selected evidence.
+6. Python calculates the final confidence score; it is not supplied by the model.
 
-## Project layout
+## Quick start
 
+### 1. Install dependencies
+
+```bash
+python -m venv .venv
+# Windows
+.venv\\Scripts\\activate
+# macOS/Linux: source .venv/bin/activate
+
+pip install -r requirements.txt
 ```
+
+### 2. Configure API keys
+
+Create a `.env` file in the project root:
+
+```env
+GROQ_API_KEY=your_groq_key
+GUARDIAN_API_KEY=your_guardian_key
+NEWSAPI_KEY=your_newsapi_key
+DEBUG_RETRIEVAL=1
+```
+
+`GROQ_API_KEY` is required for query understanding and verdict generation. At least one of `GUARDIAN_API_KEY` or `NEWSAPI_KEY` is required for live evidence retrieval.
+
+Free keys are available from [Groq](https://console.groq.com), [The Guardian Open Platform](https://open-platform.theguardian.com/access/), and [NewsAPI](https://newsapi.org/register).
+
+### 3. Run the project
+
+```bash
+# Download datasets, run EDA, and perform SQLite analysis without API calls
+python main.py --skip_pipeline
+
+# Check API connectivity before a live run
+python test_connectivity.py
+
+# Run the live pipeline on three current, verified claims
+python main.py --n_samples 3
+
+# Launch the interactive web app
+streamlit run app.py
+```
+
+Useful options:
+
+```bash
+python main.py --claims_source current --n_samples 10
+python main.py --claims_source liar --n_samples 10
+python main.py --claims_file your_claims.csv
+```
+
+Custom claim files should contain `id`, `statement`, and `label_3way` columns.
+
+## Data sources
+
+| Purpose | Source |
+|---|---|
+| Historical claims | [LIAR dataset](https://github.com/tfs4/liar_dataset), William Wang, ACL 2017 |
+| Source credibility | [MBFC-derived corpus](https://github.com/ramybaly/News-Media-Reliability), Baly et al., ACL 2020 |
+| Primary live evidence | [The Guardian Open Platform](https://open-platform.theguardian.com) |
+| Fallback live evidence | [NewsAPI](https://newsapi.org) |
+| Query understanding and verdicts | [Groq](https://groq.com) with Llama 3.3 70B |
+
+Datasets are downloaded automatically on the first pipeline run.
+
+## Project structure
+
+```text
 factora/
-├── main.py                  <- runs the whole project, in order
-├── app.py                   <- Streamlit interactive demo
-├── config.py                <- paths, dataset URLs, API config, tuning constants
+├── app.py                 # Streamlit interface
+├── main.py                # End-to-end pipeline runner
+├── config.py              # Paths, API settings, and tuning constants
+├── test_connectivity.py   # API connectivity checks
 ├── requirements.txt
-├── .env.example              <- copy to .env and add your API keys
-├── test_connectivity.py      <- isolated check that each API is reachable
-├── LICENSE
 ├── data/
-│   ├── raw/                  <- downloaded LIAR + MBFC datasets
-│   └── processed/            <- factora.db (SQLite)
+│   ├── raw/               # Downloaded source datasets
+│   └── processed/         # SQLite database
 ├── outputs/
-│   ├── plots/                 <- EDA + evaluation charts (.png)
-│   ├── results/                <- CSVs, evaluation_report.txt
-│   └── sql/                     <- queries.sql + query results
+│   ├── plots/             # EDA and evaluation charts
+│   ├── results/           # Pipeline results and evaluation reports
+│   └── sql/               # SQL queries and outputs
 └── src/
-    ├── download_data.py      <- pulls real datasets from GitHub mirrors
-    ├── data_loader.py        <- parses LIAR + MBFC into DataFrames
-    ├── credibility.py        <- domain -> credibility score lookup
-    ├── retrieval.py           <- LLM query understanding + Guardian/NewsAPI retrieval
-    ├── confidence.py           <- computed (not model-generated) confidence scoring
-    ├── verdict.py                <- LLM verdict generation
-    ├── current_claims.py          <- small verified claim set for live-pipeline testing
-    ├── pipeline.py                  <- batch: claim -> evidence -> verdict
-    ├── evaluate.py                    <- metrics, confusion matrices
-    ├── eda.py                          <- exploratory data analysis
-    └── sql_analysis.py                  <- SQLite + joins/aggregation/window functions
+    ├── retrieval.py       # Query understanding and evidence retrieval
+    ├── credibility.py     # Domain credibility lookup
+    ├── confidence.py      # Evidence-based confidence calculation
+    ├── verdict.py         # LLM verdict generation
+    ├── pipeline.py        # Batch fact-checking
+    ├── evaluate.py        # Metrics and confusion matrices
+    ├── eda.py             # Exploratory data analysis
+    └── sql_analysis.py    # SQLite analysis
 ```
 
-## Datasets and APIs
+## Important limitation
 
-| Component | Source | Notes |
-|---|---|---|
-| Claims | [LIAR dataset](https://github.com/tfs4/liar_dataset) (William Wang, ACL 2017) | 12,836 political statements, downloaded automatically |
-| Source credibility | [MBFC-derived corpus](https://github.com/ramybaly/News-Media-Reliability) (Baly et al., ACL 2020) | 859 rated news domains, downloaded automatically |
-| Live evidence (primary) | [The Guardian Open Platform](https://open-platform.theguardian.com) | Free key, emailed instantly. Returns real article snippets. |
-| Live evidence (secondary) | [NewsAPI](https://newsapi.org) `/v2/everything` | Free tier: 100 requests/day. Only called when The Guardian finds nothing. |
-| Query understanding + verdicts | [Groq](https://console.groq.com) (Llama 3.3 70B) | Free tier |
+The LIAR dataset contains historical political statements, mostly from 2007–2016, and has no date column. Because live news search favors recent coverage, using LIAR claims with the live retrieval pipeline can produce many `unverifiable` results. LIAR is intended for offline EDA, SQL, and evaluation; use the default `current` claims or a recent custom claims file for live fact-checking.
 
-Both datasets download automatically on first run — no manual downloading needed.
-
-## If retrieval seems stuck or every claim comes back "unverifiable"
-
-Run `python test_connectivity.py` first — it makes one isolated call to each
-API with a short timeout and prints exactly what happened (success, timeout,
-connection error, or a non-200 response). This tells you in under a minute
-whether the problem is retrieval logic or your network being unable to reach
-a given API.
-
-The main pipeline also prints this same diagnostic detail for every API call
-by default (`DEBUG_RETRIEVAL=1` in `.env`). Set `DEBUG_RETRIEVAL=0` once
-things are confirmed working, to quiet the output.
-
-## Important: LIAR vs. live retrieval
-
-LIAR's claims are historical political statements (roughly 2007–2016) with
-**no date column**, and live news search naturally favours recent coverage.
-Running the pipeline against LIAR will show a very high **unverifiable**
-rate — this is a structural mismatch between an old claims benchmark and a
-live-news retrieval system, not a bug.
-
-- **LIAR** remains valid for offline analysis (EDA, SQL) — no live retrieval needed.
-- **For the live pipeline**, use the default `--claims_source current` — a
-  small, verified starter set in `src/current_claims.py`, each claim sourced
-  from a real, cited fact-check.
-- **To extend it**, supply your own claims with `--claims_file yours.csv`
-  (columns: `id, statement, label_3way`).
-- To see how the system behaves on LIAR anyway, run `--claims_source liar`.
-
-## Known limitations
-
-- LIAR is not suitable for live-retrieval evaluation (see above).
-- A claim with no real news coverage correctly returns **unverifiable**, not
-  **false** — catching a fabricated claim as "false" requires a source that
-  actively contradicts it, which rarely exists for random viral claims. When
-  a claim describes something that would obviously be major news if true,
-  the system flags the total absence of coverage as suspicious without
-  overclaiming it as confirmed false.
-- NewsAPI's free tier is capped at 100 requests/day; since it's only called
-  as a fallback when The Guardian finds nothing, this is rarely a bottleneck.
+An absence of coverage is not automatically treated as proof that a claim is false. Factora reports `unverifiable` when reliable contradictory evidence cannot be found.
 
 ## License
 
-MIT — see `LICENSE`.
+This project is licensed under the [MIT License](LICENSE).
