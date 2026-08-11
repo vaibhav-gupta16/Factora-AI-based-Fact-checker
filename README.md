@@ -5,25 +5,18 @@ news sources, scores each source's credibility, and returns a verdict (true /
 false / mixed / unverifiable) with a confidence score computed from the
 evidence — not guessed by a model.
 
-Built for: **BCSE206L Foundations of Data Science**
-
 ## Quick start
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env               # then add your GROQ_API_KEY (required)
-                                    # and GUARDIAN_API_KEY (recommended, primary)
 
-python main.py --skip_pipeline     # offline steps only — download data, EDA, SQL
-                                    # (no API keys needed for this step)
+python main.py --skip_pipeline 
 
-python test_connectivity.py        # confirms Guardian/NewsAPI are reachable
-                                    # from your network before a real run
+python test_connectivity.py        
 
-python main.py --n_samples 3       # full run: live retrieval + verdicts over
-                                    # 3 verified CURRENT claims (default source)
+python main.py --n_samples 3       
 
-streamlit run app.py               # interactive demo — check any claim live
+streamlit run app.py             
 ```
 
 ## Getting API keys (all free, no card required)
