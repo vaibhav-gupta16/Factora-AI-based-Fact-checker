@@ -1,0 +1,27 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Downloaded data and generated outputs (regenerated automatically on run)
+data/raw/*
+data/processed/*
+outputs/plots/*
+outputs/results/*
+outputs/sql/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!outputs/plots/.gitkeep
+!outputs/results/.gitkeep
+!outputs/sql/.gitkeep
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
