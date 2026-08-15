@@ -88,7 +88,11 @@ def _assess_plausibility_without_evidence(claim: str) -> dict | None:
             model=config.GROQ_MODEL,
             messages=[{"role": "system", "content": _PLAUSIBILITY_PROMPT},
                       {"role": "user", "content": f"Claim: {claim}"}],
-            temperature=0.1, max_tokens=120,
+            temperature=0.1,
+            max_completion_tokens=600,
+            reasoning_effort="low",
+            reasoning_format="hidden",
+            response_format={"type": "json_object"},
         )
         raw = completion.choices[0].message.content.strip()
         if raw.startswith("```"):
@@ -136,13 +140,26 @@ def generate_verdict(claim: str, evidence: list[dict], show_credibility: bool = 
         model=config.GROQ_MODEL,
         messages=[{"role": "system", "content": SYSTEM_PROMPT},
                   {"role": "user", "content": user_prompt}],
-        temperature=0.1, max_tokens=300,
+        temperature=0.1,
+        max_completion_tokens=1200,
+        reasoning_effort="low",
+        reasoning_format="parsed",  # keeps content clean JSON (same guarantee
+                                     # as "hidden") but ALSO exposes the
+                                     # model's reasoning in a separate field,
+                                     # so DEBUG_RETRIEVAL can show *why* a
+                                     # verdict was reached instead of just what.
+        response_format={"type": "json_object"},
     )
     raw = completion.choices[0].message.content.strip()
     if raw.startswith("```"):
         raw = raw.strip("`")
         if raw.lower().startswith("json"):
             raw = raw[4:].strip()
+
+    if config.DEBUG_RETRIEVAL:
+        reasoning_trace = getattr(completion.choices[0].message, "reasoning", None)
+        if reasoning_trace:
+            print(f"[verdict] model reasoning: {reasoning_trace[:400]}")
 
     try:
         parsed = json.loads(raw)

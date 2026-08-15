@@ -6,7 +6,7 @@ It includes both an end-to-end data-science pipeline and a Streamlit web app for
 
 ## Features
 
-- LLM-assisted claim and search-query understanding using Groq (Llama 3.3 70B)
+- LLM-assisted claim and search-query understanding using Groq (GPT OSS 120B)
 - Live evidence retrieval from The Guardian, with NewsAPI as a fallback
 - TF-IDF cosine-similarity filtering for article relevance
 - MBFC-derived credibility scores for 859 news domains
@@ -50,6 +50,8 @@ DEBUG_RETRIEVAL=1
 
 `GROQ_API_KEY` is required for query understanding and verdict generation. At least one of `GUARDIAN_API_KEY` or `NEWSAPI_KEY` is required for live evidence retrieval.
 
+Factora uses Groq's `openai/gpt-oss-120b` model by default. The model is configured in `config.py` via `GROQ_MODEL`; the Groq API key does not need to be changed when changing models. Groq's alternative recommended replacement is `qwen/qwen3.6-27b`.
+
 Free keys are available from [Groq](https://console.groq.com), [The Guardian Open Platform](https://open-platform.theguardian.com/access/), and [NewsAPI](https://newsapi.org/register).
 
 ### 3. Run the project
@@ -86,7 +88,7 @@ Custom claim files should contain `id`, `statement`, and `label_3way` columns.
 | Source credibility | [MBFC-derived corpus](https://github.com/ramybaly/News-Media-Reliability), Baly et al., ACL 2020 |
 | Primary live evidence | [The Guardian Open Platform](https://open-platform.theguardian.com) |
 | Fallback live evidence | [NewsAPI](https://newsapi.org) |
-| Query understanding and verdicts | [Groq](https://groq.com) with Llama 3.3 70B |
+| Query understanding and verdicts | [Groq](https://groq.com) with `openai/gpt-oss-120b` |
 
 Datasets are downloaded automatically on the first pipeline run.
 

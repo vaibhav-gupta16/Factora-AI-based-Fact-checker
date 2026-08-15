@@ -106,7 +106,10 @@ def generate_search_terms_llm(claim: str) -> dict | None:
                 {"role": "user", "content": f"Claim: {claim}"},
             ],
             temperature=0.1,
-            max_tokens=200,
+            max_completion_tokens=600,
+            reasoning_effort="low",
+            reasoning_format="hidden",
+            response_format={"type": "json_object"},
         )
         raw = completion.choices[0].message.content.strip()
         if raw.startswith("```"):
@@ -383,6 +386,63 @@ def score_relevance(claim: str, articles: list[dict]) -> list[float]:
         return [0.0] * len(articles)
 
 
+def _matched_terms(terms: dict, article: dict) -> list[str]:
+    """Which of the extracted phrases/keywords literally appear (case-
+    insensitive substring) in this article's title+description."""
+    text = f"{article.get('title', '')} {article.get('description', '')}".lower()
+    matched = []
+    for p in terms.get("phrases", []):
+        if p.lower() in text:
+            matched.append(p)
+    for k in terms.get("keywords", []):
+        if k.lower() in text:
+            matched.append(k)
+    return matched
+
+
+def _passes_term_coverage(terms: dict, article: dict) -> bool:
+    """
+    Requires at least 2 distinct extracted terms (or all of them, if fewer
+    than 2 were extracted) to literally appear in the article.
+
+    TF-IDF cosine similarity alone is not enough: a claim like "Silver Lake
+    in Talks to Buy Workday" can score an unrelated movie review (which
+    happens to mention the LA neighbourhood "Silver Lake") or a lifestyle
+    article (which happens to use the common word "workday") non-trivially,
+    because those are ordinary words/names with unrelated everyday meanings.
+    Requiring TWO distinct terms to co-occur is a much stronger signal: an
+    article coincidentally containing "Silver Lake" as a place name is
+    common; one that ALSO happens to mention "Workday" is not, unless it is
+    genuinely about this story.
+    """
+    total_terms = len(terms.get("phrases", [])) + len(terms.get("keywords", []))
+    if total_terms == 0:
+        return True  # no terms to check against (e.g. manual query override)
+    required = min(2, total_terms)
+    return len(_matched_terms(terms, article)) >= required
+
+
+def _filter_relevant(claim: str, articles: list[dict], floor: float,
+                      terms: dict | None = None) -> list[dict]:
+    """
+    Scores articles for relevance ONCE and attaches the score to each
+    article dict (so later steps like rank_evidence reuse this exact
+    number instead of recomputing TF-IDF against a different, smaller
+    corpus — cosine similarity is corpus-relative, so recomputing it on a
+    different document set silently changes the numbers for the same
+    article). Also applies the term-coverage check when `terms` is given.
+    """
+    if not articles:
+        return []
+    rels = score_relevance(claim, articles)
+    for a, r in zip(articles, rels):
+        a["_relevance"] = float(r)
+    kept = [a for a in articles if a["_relevance"] >= floor]
+    if terms is not None:
+        kept = [a for a in kept if _passes_term_coverage(terms, a)]
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # Step 5: main fetch function
 # ---------------------------------------------------------------------------
@@ -398,15 +458,15 @@ def fetch_evidence_articles(
     Returns (relevant_articles, description_of_query_used).
     """
     if query:
-        guardian_arts = _call_guardian(query, page_size)
-        rels = score_relevance(claim, guardian_arts)
-        relevant = [a for a, r in zip(guardian_arts, rels) if r >= config.RELEVANCE_FLOOR["and"]]
-        if relevant:
-            return relevant, f"Guardian: {query}"
-        newsapi_arts = _call_newsapi(query, page_size)
-        rels = score_relevance(claim, newsapi_arts)
-        relevant = [a for a, r in zip(newsapi_arts, rels) if r >= config.RELEVANCE_FLOOR["and"]]
-        return relevant, f"NewsAPI: {query}"
+        # Manual override has no extracted terms to check coverage against,
+        # so it relies on the relevance floor alone.
+        guardian_arts = _filter_relevant(claim, _call_guardian(query, page_size),
+                                          config.RELEVANCE_FLOOR["and"])
+        if guardian_arts:
+            return guardian_arts, f"Guardian: {query}"
+        newsapi_arts = _filter_relevant(claim, _call_newsapi(query, page_size),
+                                         config.RELEVANCE_FLOOR["and"])
+        return newsapi_arts, f"NewsAPI: {query}"
 
     terms = get_search_terms(claim)
     guardian_ladder = build_guardian_queries(terms)
@@ -425,8 +485,7 @@ def fetch_evidence_articles(
             guardian_arts = _dedupe(_call_guardian(uq, page_size))
             last_desc = f"Guardian: {uq}"
             if guardian_arts:
-                rels = score_relevance(claim, guardian_arts)
-                relevant = [a for a, r in zip(guardian_arts, rels) if r >= floor]
+                relevant = _filter_relevant(claim, guardian_arts, floor, terms)
                 if relevant:
                     return relevant, last_desc
 
@@ -436,8 +495,7 @@ def fetch_evidence_articles(
             newsapi_arts = _dedupe(_call_newsapi(nq, page_size))
             last_desc = f"Guardian: {uq or '(skipped)'} | NewsAPI: {nq}"
             if newsapi_arts:
-                rels = score_relevance(claim, newsapi_arts)
-                relevant = [a for a, r in zip(newsapi_arts, rels) if r >= floor]
+                relevant = _filter_relevant(claim, newsapi_arts, floor, terms)
                 if relevant:
                     return relevant, last_desc
 
@@ -454,9 +512,20 @@ def rank_evidence(
 ) -> list[dict]:
     if not articles:
         return []
-    relevances = score_relevance(claim, articles)
+    # Reuse the relevance score computed during fetch_evidence_articles if
+    # present (see _filter_relevant) — recomputing TF-IDF here against a
+    # different, smaller article set would silently change the numbers for
+    # the same claim/article pair, since cosine similarity is corpus-
+    # relative. Only recompute if scores genuinely weren't attached yet
+    # (e.g. this function is called directly in isolation, such as from
+    # tests or get_evidence_for_claim's baseline ranking).
+    if all("_relevance" in a for a in articles):
+        relevances = [a["_relevance"] for a in articles]
+    else:
+        relevances = score_relevance(claim, articles)
     enriched = []
     for art, rel in zip(articles, relevances):
+        art = {k: v for k, v in art.items() if k != "_relevance"}  # drop internal field
         cred_label = credibility_scorer.label(art["domain"])
         cred_score = credibility_scorer.score(art["domain"])
         weighted = rel * cred_score if use_credibility else rel

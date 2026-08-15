@@ -80,7 +80,18 @@ NEWSAPI_SIGNUP = "https://newsapi.org/register"
 # newsapi.org/docs/endpoints/everything).
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# llama-3.3-70b-versatile is being decommissioned by Groq on 2026-08-16.
+# Its recommended replacements (openai/gpt-oss-120b, qwen/qwen3.6-27b) are
+# REASONING models, not simple instruction-following chat models — Groq's
+# entire non-reasoning general-purpose lineup was deprecated alongside it,
+# so there is no drop-in equivalent left. This matters for code, not just
+# config: reasoning models need `reasoning_format` set (Groq's own docs:
+# "when using JSON mode ... only parsed or hidden formats are supported")
+# or their internal reasoning tokens can leak into the response content
+# and break JSON parsing. See src/verdict.py and src/retrieval.py, which
+# both set reasoning_format="hidden" and use JSON mode for exactly this
+# reason.
+GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_SIGNUP = "https://console.groq.com"
 
 # ---------------------------------------------------------------------------
