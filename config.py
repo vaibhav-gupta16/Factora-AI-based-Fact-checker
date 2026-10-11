@@ -1,6 +1,3 @@
-"""
-Central configuration for Factora.
-"""
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -69,9 +66,15 @@ GUARDIAN_SIGNUP = "https://open-platform.theguardian.com/access/"
 # working end to end.
 DEBUG_RETRIEVAL = os.getenv("DEBUG_RETRIEVAL", "1") == "1"
 
-# NewsAPI (SECONDARY / fallback evidence source) — free key, 100 req/day.
-# Only called for a given search stage if The Guardian returns nothing
-# usable at that stage, to conserve this daily quota.
+# Google News RSS (AGGREGATOR evidence source) — no key, no rate limit.
+# Aggregates articles from ALL major publishers (BBC, Reuters, AP, etc.)
+# and supports free-text search queries. Used alongside Guardian as a
+# primary source to maximise evidence diversity.
+GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
+
+# NewsAPI (TERTIARY / fallback evidence source) — free key, 100 req/day.
+# Only called if BOTH The Guardian AND Google News RSS return nothing
+# usable, to conserve this daily quota.
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
 NEWSAPI_URL = "https://newsapi.org/v2/everything"
 NEWSAPI_SIGNUP = "https://newsapi.org/register"
@@ -106,17 +109,22 @@ LABEL_MAP_3WAY = {
 CREDIBILITY_SCORE_MAP = {"low": 0.2, "mixed": 0.55, "high": 0.9}
 UNKNOWN_SOURCE_SCORE = 0.5
 
-# ---------------------------------------------------------------------------
-# Retrieval tuning
-# ---------------------------------------------------------------------------
-# Relevance floors, by query specificity. Exact-phrase and AND-narrowed
-# queries are already precise, so a modest floor is enough to catch stray
-# noise. The OR safety-net stage is broad by design and needs a firmer
-# floor to reject generic matches. Both The Guardian and NewsAPI provide
-# real article snippets (not just a title), so relevance scores tend to be
-# meaningfully higher for genuinely on-topic results.
-RELEVANCE_FLOOR = {"phrase": 0.06, "and": 0.06, "or": 0.15}
+
+RELEVANCE_FLOOR = {
+    "and":    0.10,
+    "phrase": 0.08,
+    "or":     0.05,
+    "wiki":   0.05,   
+}
 
 DEFAULT_N_SAMPLES = 60
 DEFAULT_TOP_K_EVIDENCE = 5
 RANDOM_SEED = 42
+
+# ---------------------------------------------------------------------------
+# Source diversity (used by confidence scoring)
+# ---------------------------------------------------------------------------
+# How many distinct publishers constitute "fully diverse" evidence.
+# 3+ different publishers (e.g. Guardian + BBC + Reuters) = maximum
+# diversity score.  Fewer = proportionally lower.
+DIVERSITY_SATURATION = 3

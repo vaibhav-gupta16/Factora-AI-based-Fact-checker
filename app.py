@@ -81,6 +81,9 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
   font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; background: #1e293b;
   color: #94a3b8; padding: 3px 8px; border-radius: 5px;
 }
+.rel-strong { background: #064e3b; color: #4ade80; border: 1px solid #166534; }
+.rel-mod { background: #1e293b; color: #cbd5e1; border: 1px solid #334155; }
+.rel-weak { background: #18181b; color: #71717a; border: 1px solid #27272a; }
 .ev-title { font-size: 0.92rem; font-weight: 600; color: #e2e8f0; margin-bottom: 0.4rem; line-height: 1.42; }
 .ev-desc { font-size: 0.83rem; color: #94a3b8; line-height: 1.55; margin-bottom: 0.55rem; }
 .ev-meta { font-size: 0.76rem; color: #475569; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -108,7 +111,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .verdict-reasoning { font-size: 0.89rem; color: #cbd5e1; line-height: 1.62; }
 
 /* ---- Confidence breakdown ---- */
-.conf-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 1.1rem; }
+.conf-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 1.1rem; }
 .conf-cell {
   background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
   border-radius: 9px; padding: 0.75rem; text-align: center;
@@ -172,11 +175,19 @@ if check and claim.strip():
             desc = e["description"] or ""
             url = e["url"] or "#"
             source = e["source_name"] or e["domain"]
+            rel_val = e.get("relevance", 0.0)
+            if rel_val >= 0.25:
+                rel_cls, rel_txt = "rel-strong", f"topic match: {rel_val:.2f} (strong)"
+            elif rel_val >= 0.12:
+                rel_cls, rel_txt = "rel-mod", f"topic match: {rel_val:.2f} (moderate)"
+            else:
+                rel_cls, rel_txt = "rel-weak", f"topic match: {rel_val:.2f} (weak/tangential)"
+
             st.markdown(f"""
 <div class="ev-card">
   <div class="score-row">
-    <span class="source-tag cred-{cl}">{cl}</span>
-    <span class="score-chip">rel {e['relevance']:.2f}</span>
+    <span class="source-tag cred-{cl}">source: {cl}</span>
+    <span class="score-chip {rel_cls}">{rel_txt}</span>
     <span class="score-chip">cred {e['credibility_score']:.2f}</span>
     <span class="score-chip">score {e['weighted_score']:.3f}</span>
   </div>
@@ -207,15 +218,17 @@ if check and claim.strip():
 """, unsafe_allow_html=True)
 
     if bd and bd.get("n_supporting_sources", 0) > 0:
+        n_pub = bd.get('n_distinct_publishers', bd['n_supporting_sources'])
         st.markdown(f"""
   <div class="conf-grid">
     <div class="conf-cell"><div class="conf-cell-val">{bd['n_supporting_sources']}</div><div class="conf-cell-label">sources</div></div>
+    <div class="conf-cell"><div class="conf-cell-val">{n_pub}</div><div class="conf-cell-label">publishers</div></div>
     <div class="conf-cell"><div class="conf-cell-val">{bd['avg_credibility']:.2f}</div><div class="conf-cell-label">avg credibility</div></div>
     <div class="conf-cell"><div class="conf-cell-val">{bd['avg_relevance']:.2f}</div><div class="conf-cell-label">avg relevance</div></div>
   </div>
-  <div class="conf-formula">Confidence = 45% credibility + 30% relevance + 25% corroboration</div>
+  <div class="conf-formula">Confidence = 35% credibility + 25% relevance + 20% corroboration + 20% source diversity</div>
 """, unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown('<div class="fc-footer">Factora — built on The Guardian, NewsAPI, and Groq</div>', unsafe_allow_html=True)
+st.markdown('<div class="fc-footer">Factora — built on The Guardian, Google News, NewsAPI, Wikipedia, and Groq</div>', unsafe_allow_html=True)

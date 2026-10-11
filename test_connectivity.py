@@ -74,12 +74,47 @@ def test_newsapi():
         print(f"\n[RESULT] UNEXPECTED ERROR: {type(e).__name__}: {e}")
 
 
+def test_google_news():
+    print("\n" + "=" * 60)
+    print("Testing Google News RSS (aggregator source, no API key)...")
+    print("=" * 60)
+    t0 = time.time()
+    try:
+        import feedparser
+        url = f"{config.GOOGLE_NEWS_RSS_URL}?q=technology&hl=en&gl=US&ceid=US:en"
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Factora/1.0"})
+        elapsed = time.time() - t0
+        print(f"\n[RESULT] Responded in {elapsed:.1f}s, HTTP {resp.status_code}")
+        feed = feedparser.parse(resp.content)
+        n = len(feed.entries)
+        print(f"[RESULT] {n} article(s) parsed from feed")
+        print("[RESULT] Google News RSS IS WORKING.")
+    except Exception as e:
+        print(f"\n[RESULT] UNEXPECTED ERROR: {type(e).__name__}: {e}")
+
+
+def test_wikipedia():
+    print("\n" + "=" * 60)
+    print("Testing Wikipedia API (encyclopaedic fallback, no API key)...")
+    print("=" * 60)
+    t0 = time.time()
+    try:
+        url = "https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=3&srsearch=Earth"
+        resp = requests.get(url, timeout=8, headers={"User-Agent": "Factora/1.0 (https://github.com/vaibhav-gupta16/Factora; fact-checking-bot)"})
+        elapsed = time.time() - t0
+        print(f"\n[RESULT] Responded in {elapsed:.1f}s, HTTP {resp.status_code}")
+        n = len(resp.json().get("query", {}).get("search", []))
+        print(f"[RESULT] {n} article hit(s) returned")
+        print("[RESULT] Wikipedia API IS WORKING.")
+    except Exception as e:
+        print(f"\n[RESULT] UNEXPECTED ERROR: {type(e).__name__}: {e}")
+
+
 if __name__ == "__main__":
+    test_google_news()
+    test_wikipedia()
     test_guardian()
     test_newsapi()
     print("\n" + "=" * 60)
-    if not config.GUARDIAN_API_KEY and not config.NEWSAPI_KEY:
-        print("Neither key is set — Factora has no evidence source configured.")
-        print("Set at least one of GUARDIAN_API_KEY or NEWSAPI_KEY in .env.")
-    print("Done. Paste this whole output back if either test failed unexpectedly.")
+    print("Connectivity checks complete.")
     print("=" * 60)

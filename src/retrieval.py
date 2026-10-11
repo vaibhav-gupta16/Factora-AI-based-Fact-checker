@@ -1,36 +1,9 @@
-"""
-Evidence retrieval pipeline.
-
-1. Understand the claim's search-relevant content using the LLM (Groq) —
-   this reads the claim in context and picks the terms a real news
-   headline would actually use, rather than mechanically grabbing
-   capitalised words. Falls back to a regex heuristic if Groq is
-   unavailable.
-2. Build a specific-to-broad query ladder from those terms, with
-   PER-API-CORRECT syntax:
-     - The Guardian (PRIMARY): free-text search, no confirmed boolean
-       operators, so terms are plain space-joined.
-     - NewsAPI (SECONDARY / fallback): explicit AND / OR / NOT keywords
-       and quoted phrases are supported (confirmed via NewsAPI's own docs).
-3. At each ladder stage, The Guardian is tried first. Only if it returns
-   nothing (or nothing clears the relevance floor) is NewsAPI tried for
-   that same stage — this is a primary/fallback relationship, not a
-   merge, to conserve NewsAPI's daily quota.
-4. A relevance floor (TF-IDF cosine similarity) discards off-topic
-   matches before they can reach the LLM verdict step.
-5. Returns the first stage whose filtered results are non-empty.
-
-Note: GDELT was removed as a source. It proved unreliable across several
-fix attempts (request timeouts, GDELT's own 5-second rate limit, and a
-suspected broken IPv6 route on some networks that caused Python's
-requests library to hang even though the same URL loaded fine in a
-browser). The Guardian and NewsAPI are both confirmed reliable and are
-used instead.
-"""
 import json
 import re
 import sys
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -50,6 +23,11 @@ _STOPWORDS = {
     "claims", "claim", "claimed", "viral", "post", "posts", "social",
     "media", "says", "said", "according", "report", "reports", "reported",
 }
+
+# Wikipedia gets a fixed credibility score equivalent to a high-credibility
+# news source: crowd-edited but heavily cited and fact-checked for major topics.
+_WIKIPEDIA_CREDIBILITY = 0.75
+_WIKIPEDIA_DOMAINS = {"en.wikipedia.org", "wikipedia.org"}
 
 
 class NewsAPIError(RuntimeError):
@@ -264,6 +242,41 @@ def build_newsapi_queries(terms: dict) -> list[tuple[str, str]]:
     return out
 
 
+def _build_wikipedia_query(terms: dict) -> str:
+    """Build a plain-text Wikipedia search query from extracted terms."""
+    parts = terms.get("phrases", [])[:2] + terms.get("keywords", [])[:2]
+    return " ".join(parts)
+
+
+def build_wikipedia_queries(terms: dict) -> list[str]:
+    """Build a multi-stage query ladder for Wikipedia:
+    1. Core single concept phrase (e.g. 'Moonlight', 'Earth orbit')
+    2. Multiple concept phrases if present
+    3. Phrases + distinctive keywords (e.g. 'Earth orbit 365.25')
+    4. Keywords alone if phrases are absent
+    """
+    ladder = []
+    phrases = terms.get("phrases", [])
+    keywords = terms.get("keywords", [])
+
+    if phrases:
+        ladder.append(phrases[0])
+    if len(phrases) >= 2:
+        ladder.append(" ".join(phrases[:2]))
+    if phrases and keywords:
+        ladder.append(" ".join(phrases[:2] + keywords[:2]))
+    elif keywords:
+        ladder.append(" ".join(keywords[:3]))
+
+    seen, out = set(), []
+    for q in ladder:
+        q = q.strip()
+        if q and q not in seen:
+            seen.add(q)
+            out.append(q)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Step 3: API calls
 # ---------------------------------------------------------------------------
@@ -360,6 +373,171 @@ def _call_newsapi(query: str, page_size: int) -> list[dict]:
     return articles
 
 
+def _call_wikipedia(query: str, n_results: int = 3) -> list[dict]:
+    """
+    Wikipedia (ENCYCLOPAEDIC fallback) — no key, no rate limit beyond
+    politeness. Used when Guardian + NewsAPI both return no usable evidence,
+    typically for well-known factual claims that predate recent news cycles
+    (e.g. Chandrayaan-3 landing, scientific facts, historical events).
+
+    Two-step with batching: search API to find matching page IDs, then a
+    SINGLE batched extracts API request to get all lead sections at once.
+    This avoids sequential HTTP requests, latency, and HTTP 429 rate limits.
+    """
+    headers = {
+        "User-Agent": "Factora/1.0 (https://github.com/vaibhav-gupta16/Factora; fact-checking-bot)"
+    }
+    try:
+        search_url = (
+            "https://en.wikipedia.org/w/api.php?action=query"
+            "&list=search&format=json&srlimit=8&srsearch="
+            + urllib.parse.quote(query)
+        )
+        req = urllib.request.Request(search_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as r:
+            results = json.loads(r.read()).get("query", {}).get("search", [])
+    except Exception as e:
+        if config.DEBUG_RETRIEVAL:
+            print(f"[wikipedia] search error: {e}")
+        return []
+
+    if config.DEBUG_RETRIEVAL:
+        print(f"[wikipedia] {len(results)} search hit(s) for query: {query!r}")
+
+    hits = results[:n_results]
+    if not hits:
+        return []
+
+    pageids = [str(h["pageid"]) for h in hits if h.get("pageid")]
+    if not pageids:
+        return []
+
+    try:
+        page_url = (
+            "https://en.wikipedia.org/w/api.php?action=query"
+            "&prop=extracts&exintro=1&explaintext=1&format=json&pageids="
+            + "|".join(pageids)
+        )
+        req2 = urllib.request.Request(page_url, headers=headers)
+        with urllib.request.urlopen(req2, timeout=8) as r2:
+            page_data = json.loads(r2.read())
+        pages = page_data.get("query", {}).get("pages", {})
+    except Exception as e:
+        if config.DEBUG_RETRIEVAL:
+            print(f"[wikipedia] batched extract error: {e}")
+        return []
+
+    articles = []
+    # Preserve original search ranking order
+    for hit in hits:
+        pid = str(hit["pageid"])
+        page_info = pages.get(pid, {})
+        extract = page_info.get("extract", "")
+        if not extract:
+            continue
+        snippet = extract[:1200].strip()
+        wiki_title = hit.get("title") or page_info.get("title", "")
+        articles.append({
+            "title": wiki_title,
+            "description": snippet,
+            "source_name": "Wikipedia",
+            "domain": "en.wikipedia.org",
+            "url": (
+                "https://en.wikipedia.org/wiki/"
+                + urllib.parse.quote(wiki_title.replace(" ", "_"))
+            ),
+            "published_at": "",
+        })
+        if config.DEBUG_RETRIEVAL:
+            print(f"[wikipedia] fetched article: {wiki_title!r}")
+
+    return articles
+
+
+def _call_google_news_rss(query: str, n_results: int = 10) -> list[dict]:
+    """Google News RSS (AGGREGATOR source) — no API key, no rate limit.
+    Aggregates articles from ALL major publishers (BBC, Reuters, AP, NYT,
+    etc.) and supports free-text search queries.  This single source
+    dramatically improves evidence diversity: instead of 2-3 articles from
+    one publisher, we get articles from many independent outlets in one
+    call, making contradictory/mixed evidence findable."""
+    try:
+        import feedparser
+    except ImportError:
+        if config.DEBUG_RETRIEVAL:
+            print("[google_news] feedparser not installed — pip install feedparser")
+        return []
+
+    encoded = urllib.parse.quote(query)
+    url = f"{config.GOOGLE_NEWS_RSS_URL}?q={encoded}&hl=en&gl=US&ceid=US:en"
+
+    try:
+        resp = requests.get(
+            url, timeout=10,
+            headers={"User-Agent": "Factora/1.0 (fact-checking project)"},
+        )
+        if resp.status_code != 200:
+            if config.DEBUG_RETRIEVAL:
+                print(f"[google_news] HTTP {resp.status_code} for query: {query!r}")
+            return []
+        feed = feedparser.parse(resp.content)
+    except requests.exceptions.Timeout:
+        if config.DEBUG_RETRIEVAL:
+            print(f"[google_news] TIMEOUT after 10s for query: {query!r}")
+        return []
+    except Exception as e:
+        if config.DEBUG_RETRIEVAL:
+            print(f"[google_news] {type(e).__name__} for query: {query!r} -- {e}")
+        return []
+
+    articles = []
+    for entry in feed.entries[:n_results]:
+        raw_title = entry.get("title", "")
+        link = entry.get("link", "")
+
+        # Google News titles end with " - Source Name"
+        title = raw_title
+        source_from_title = ""
+        if " - " in raw_title:
+            parts = raw_title.rsplit(" - ", 1)
+            if len(parts[1]) < 50:  # looks like a source name, not headline text
+                title = parts[0].strip()
+                source_from_title = parts[1].strip()
+
+        # Extract actual publisher from the RSS <source> element
+        entry_source = entry.get("source", {}) or {}
+        source_name = ""
+        source_domain = ""
+        if entry_source:
+            source_name = entry_source.get("title", "") or ""
+            source_href = (entry_source.get("href", "")
+                           or entry_source.get("url", "") or "")
+            if source_href:
+                source_domain = urlparse(source_href).netloc.replace("www.", "")
+
+        if not source_name:
+            source_name = source_from_title
+        if not source_domain:
+            source_domain = urlparse(link).netloc.replace("www.", "")
+
+        # Strip HTML tags from description
+        desc = entry.get("summary", "") or entry.get("description", "")
+        desc = re.sub(r'<[^>]+>', '', desc).strip()
+
+        articles.append({
+            "title": title,
+            "description": desc[:500] if desc else "",
+            "source_name": source_name or source_domain,
+            "domain": source_domain,
+            "url": link,
+            "published_at": entry.get("published", ""),
+        })
+
+    if config.DEBUG_RETRIEVAL:
+        print(f"[google_news] {len(articles)} article(s) for query: {query!r}")
+    return articles
+
+
 def _dedupe(articles: list[dict]) -> list[dict]:
     seen_urls, out = set(), []
     for art in articles:
@@ -414,7 +592,16 @@ def _passes_term_coverage(terms: dict, article: dict) -> bool:
     article coincidentally containing "Silver Lake" as a place name is
     common; one that ALSO happens to mention "Workday" is not, unless it is
     genuinely about this story.
+
+    Wikipedia articles are exempt from this check: the intro paragraph of a
+    Wikipedia article about "Chandrayaan-3" will contain "Chandrayaan" and
+    "Moon" and "India" by definition, so the coverage check would always
+    pass anyway -- but the article title itself is used as the search query,
+    so we trust the search-level relevance and skip the redundant substring
+    check for Wikipedia sources.
     """
+    if article.get("domain") in _WIKIPEDIA_DOMAINS:
+        return True  # Wikipedia search already filtered by topic
     total_terms = len(terms.get("phrases", [])) + len(terms.get("keywords", []))
     if total_terms == 0:
         return True  # no terms to check against (e.g. manual query override)
@@ -428,7 +615,7 @@ def _filter_relevant(claim: str, articles: list[dict], floor: float,
     Scores articles for relevance ONCE and attaches the score to each
     article dict (so later steps like rank_evidence reuse this exact
     number instead of recomputing TF-IDF against a different, smaller
-    corpus — cosine similarity is corpus-relative, so recomputing it on a
+    corpus -- cosine similarity is corpus-relative, so recomputing it on a
     different document set silently changes the numbers for the same
     article). Also applies the term-coverage check when `terms` is given.
     """
@@ -452,18 +639,28 @@ def fetch_evidence_articles(
 ) -> tuple[list[dict], str]:
     """
     Fetch relevant evidence for a claim. Fully automatic by default.
-    The Guardian is tried first (primary); NewsAPI is only called for a
-    given stage if the Guardian's results at that stage are empty or none
-    clear the relevance floor (secondary/fallback).
+
+    Source priority:
+      1. The Guardian + Google News RSS (primary, both free / no quota)
+         — queried together and merged for maximum diversity.
+      2. NewsAPI (tertiary fallback, 100 req/day quota)
+      3. Wikipedia (encyclopaedic fallback — well-known facts that
+         predate recent news cycles)
+
     Returns (relevant_articles, description_of_query_used).
     """
     if query:
-        # Manual override has no extracted terms to check coverage against,
-        # so it relies on the relevance floor alone.
-        guardian_arts = _filter_relevant(claim, _call_guardian(query, page_size),
-                                          config.RELEVANCE_FLOOR["and"])
-        if guardian_arts:
-            return guardian_arts, f"Guardian: {query}"
+        # Manual override: merge Guardian + Google News RSS, then
+        # fall back to NewsAPI. Wikipedia not tried for manual
+        # overrides since the user chose the query explicitly.
+        raw_combined = _dedupe(
+            _call_guardian(query, page_size)
+            + _call_google_news_rss(query, page_size)
+        )
+        relevant = _filter_relevant(claim, raw_combined,
+                                     config.RELEVANCE_FLOOR["and"])
+        if relevant:
+            return relevant, f"Guardian + Google News: {query}"
         newsapi_arts = _filter_relevant(claim, _call_newsapi(query, page_size),
                                          config.RELEVANCE_FLOOR["and"])
         return newsapi_arts, f"NewsAPI: {query}"
@@ -480,24 +677,50 @@ def fetch_evidence_articles(
         stage_type = utype or ntype
         floor = config.RELEVANCE_FLOOR[stage_type]
 
-        # Primary: The Guardian
+        # Primary: Guardian + Google News RSS (both free, no daily quota).
+        # Merged and deduped so the LLM sees evidence from many independent
+        # publishers, making true/false/mixed verdicts all reachable.
         if uq:
-            guardian_arts = _dedupe(_call_guardian(uq, page_size))
-            last_desc = f"Guardian: {uq}"
-            if guardian_arts:
-                relevant = _filter_relevant(claim, guardian_arts, floor, terms)
+            combined = _dedupe(
+                _call_guardian(uq, page_size)
+                + _call_google_news_rss(uq, page_size)
+            )
+            last_desc = f"Guardian + Google News: {uq}"
+            if combined:
+                relevant = _filter_relevant(claim, combined, floor, terms)
                 if relevant:
                     return relevant, last_desc
 
-        # Secondary/fallback: NewsAPI, only if Guardian found nothing usable
-        # at this stage.
+        # Tertiary fallback: NewsAPI (daily quota — only used if both free
+        # sources found nothing usable at this query stage).
         if nq:
             newsapi_arts = _dedupe(_call_newsapi(nq, page_size))
-            last_desc = f"Guardian: {uq or '(skipped)'} | NewsAPI: {nq}"
+            last_desc = f"NewsAPI: {nq}"
             if newsapi_arts:
                 relevant = _filter_relevant(claim, newsapi_arts, floor, terms)
                 if relevant:
                     return relevant, last_desc
+
+    # Encyclopaedic fallback: Wikipedia.
+    # Reached only when all news sources failed across all query stages.
+    # Typical for well-known facts no longer in current news cycles
+    # (missions, scientific discoveries, historical events).
+    wiki_queries = build_wikipedia_queries(terms)
+    if not wiki_queries:
+        single_q = _build_wikipedia_query(terms)
+        if single_q:
+            wiki_queries = [single_q]
+
+    for wiki_query in wiki_queries:
+        wiki_arts = _call_wikipedia(wiki_query, n_results=6)
+        if wiki_arts:
+            # Lower relevance floor for Wikipedia: intro paragraphs are
+            # shorter than news articles, so TF-IDF scores are lower.
+            wiki_floor = config.RELEVANCE_FLOOR.get("wiki", 0.05)
+            relevant = _filter_relevant(claim, wiki_arts, wiki_floor, terms)
+            if relevant:
+                last_desc = f"Wikipedia: {wiki_query}"
+                return relevant, last_desc
 
     return [], last_desc
 
@@ -513,7 +736,7 @@ def rank_evidence(
     if not articles:
         return []
     # Reuse the relevance score computed during fetch_evidence_articles if
-    # present (see _filter_relevant) — recomputing TF-IDF here against a
+    # present (see _filter_relevant) -- recomputing TF-IDF here against a
     # different, smaller article set would silently change the numbers for
     # the same claim/article pair, since cosine similarity is corpus-
     # relative. Only recompute if scores genuinely weren't attached yet
@@ -526,8 +749,15 @@ def rank_evidence(
     enriched = []
     for art, rel in zip(articles, relevances):
         art = {k: v for k, v in art.items() if k != "_relevance"}  # drop internal field
-        cred_label = credibility_scorer.label(art["domain"])
-        cred_score = credibility_scorer.score(art["domain"])
+        domain = art["domain"]
+        # Wikipedia gets a fixed credibility score; all other domains go
+        # through the MBFC-derived scorer as before.
+        if domain in _WIKIPEDIA_DOMAINS:
+            cred_label = "high"
+            cred_score = _WIKIPEDIA_CREDIBILITY
+        else:
+            cred_label = credibility_scorer.label(domain)
+            cred_score = credibility_scorer.score(domain)
         weighted = rel * cred_score if use_credibility else rel
         enriched.append({
             **art, "relevance": round(float(rel), 4),
