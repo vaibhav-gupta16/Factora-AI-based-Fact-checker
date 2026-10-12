@@ -136,7 +136,6 @@ factora/
 ├── config.py              # Configuration constants, weights, and API endpoints
 ├── test_connectivity.py   # Diagnostics and API connection checks
 ├── requirements.txt       # Python dependencies
-├── VIVA_GUIDE.md          # Comprehensive Viva preparation guide (What, Why, How)
 ├── data/
 │   ├── raw/               # LIAR benchmark and MBFC credibility datasets
 │   └── processed/         # SQLite database for SQL analysis
